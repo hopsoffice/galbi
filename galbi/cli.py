@@ -132,22 +132,40 @@ def get(key: typing.List[str]):
     config = load_config(default_config_json)
     http = get_http_session(default_config_json)
     repo = config['repo']
-    resp = http.get(
-        urllib.parse.urljoin(github_api_url, f'/repos/{repo}/issues'),
-        params={
-            'state': 'open',
-            'labels': ','.join(x.strip() for x in key),
-        }
-    )
-    resp.raise_for_status()
     cache = {}
-    for d in resp.json():
-        cache[d['title']] = json.loads(
-            http.get(
-                d['comments_url'],
-                params={'sort': 'created', 'direction': 'desc', 'per_page': 1}
-            ).json()[0]['body']
+    keys = {x for x in key}
+    issues = []
+    loadable = True
+    page = 0
+    # Results per page (max 100)
+    per_page = 100
+    while loadable:
+        resp = http.get(
+            urllib.parse.urljoin(github_api_url, f'/repos/{repo}/issues'),
+            params={
+                'state': 'open',
+                'page': page,
+                'per_page': per_page,
+            }
         )
+        resp.raise_for_status()
+        payload = resp.json()
+        issues += payload
+        if per_page > len(payload):
+            loadable = False
+        page += 1
+    for d in issues:
+        if d['title'] in keys:
+            cache[d['title']] = json.loads(
+                http.get(
+                    d['comments_url'],
+                    params={
+                        'sort': 'created',
+                        'direction': 'desc',
+                        'per_page': 1
+                    }
+                ).json()[0]['body']
+            )
     echo(json.dumps(cache, indent=4))
 
 
