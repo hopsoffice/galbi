@@ -1,27 +1,22 @@
 import json
 import os
 import pathlib
+import typing
 import urllib.parse
-import webbrowser
 
 from click import argument, command, group, option, echo
-from flask import Flask, request
 from requests import Session
-
-from .crypto import encrypt, decrypt
-from .wsgi_util import AfterResponse
 
 
 __all__ = 'main',
 default_config_directory = pathlib.Path(os.path.expanduser('~/.config/galbi'))
 default_config_json = default_config_directory / 'config.json'
-default_config_token = default_config_directory / 'token'
+github_api_url = 'https://api.github.com/'
 
 
-def read_server_url(config: pathlib.Path) -> str:
-    with config.open('r') as f:
-        payload = json.loads(f.read())
-    return payload['server']
+def load_config(p: pathlib.Path) -> dict:
+    with p.open('r') as f:
+        return json.loads(f.read())
 
 
 @group()
@@ -30,163 +25,133 @@ def main():
 
 
 @command()
+@option('--repo', help='GitHub configuration repo', required=True,
+        prompt='GitHub repo')
 @option(
-    '--server', help='Galbi server.', required=True,
-    prompt='Your galbi server'
-)
-@option(
-    '--config-dir',
-    default=default_config_directory,
-    type=pathlib.Path,
-    help='Galbi configuration directory.',
-    prompt='Your configuration directory?'
-)
-def init(server: str, config_dir: pathlib.Path):
-    parsed = urllib.parse.urlparse(server)
-    assert parsed.scheme and parsed.netloc, f'"{server}" is not an url.'
-    config_path = config_dir / 'config.json'
-    if not config_dir.exists():
-        config_dir.mkdir()
-    if config_path.exists():
-        echo('Skipping... {!s} is already exists'.format(config_path))
-        return
-    with config_path.open('w') as f:
-        f.write(json.dumps({
-            'server': server,
-        }))
-    echo('Initialize galbi.')
-
-
-@command()
-@option(
-    '--port',
-    help='Galbi port.',
-    default=5012
-)
-@option(
-    '--config-dir',
-    default=default_config_directory,
-    type=pathlib.Path,
-    help='Galbi configuration directory.',
+    '--token', help='GitHub personal access token', required=True,
+    prompt='Your GitHub personal access token'
 )
 @option(
     '--refresh',
     default=False,
     is_flag=True,
 )
-def authorize(port: int, config_dir:pathlib.Path,
-              refresh: bool):
-    token_path = config_dir / 'token'
-    if token_path.exists() and not refresh:
-        echo('Already has the token...')
-        # TODO token valid process
+def init(token: str, repo: str, refresh: bool):
+    if not default_config_directory.exists():
+        default_config_directory.mkdir()
+    config_path = default_config_directory / 'config.json'
+    if config_path.exists() and not refresh:
+        echo('Skipping... {!s} is already exists'.format(config_path))
         return
-    app = Flask(__name__ + 'flask')
-    after_response = AfterResponse()
-    after_response.init_app(app)
-
-    @app.after_response
-    def exit(path_info):
-        if path_info == '/token':
-            echo('Save token! You may close the browser...')
-            os._exit(0)
-
-    @app.route('/token', methods=['GET'])
-    def token():
-        token = request.args.get('token')
-        if token:
-            with token_path.open('w') as f:
-                f.write(token)
-            return 'Authorize done. You may close the browser.'
-        else:
-            return 'Something goes wrong...'
-
-    echo('Login github on your browser,')
-    echo('\nRunning webserver to get token...\n')
-    server = read_server_url(config_dir / 'config.json')
-    base_url = urllib.parse.urljoin(server, '/login')
-    webbrowser.open(base_url + f'?port={port}')
-    app.run(port=port)
+    with config_path.open('w') as f:
+        f.write(json.dumps({
+            'token': token,
+            'repo': repo,
+        }))
+    echo('Initialize galbi.')
 
 
 def get_http_session(token_path: pathlib.Path) -> Session:
     with token_path.open('r') as f:
-        token = f.read()
+        payload = json.loads(f.read())
+        token = payload['token']
     http = Session()
     http.headers.update({
-        'X-Galbi-Token': token,
+        'Authorization': f'token {token}',
     })
     return http
 
 
+def get_issue(label: str) -> typing.List[dict]:
+    config = load_config(default_config_json)
+    http = get_http_session(default_config_json)
+    repo = config['repo']
+    resp = http.get(
+        urllib.parse.urljoin(github_api_url, f'/repos/{repo}/issues'),
+        params={
+            'state': 'open',
+            'labels': label,
+        }
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 @command()
 @argument('filename', envvar='FILENAME', type=pathlib.Path)
-@option(
-    '--config',
-    default=default_config_json,
-    type=pathlib.Path,
-    help='Galbi configuration file.',
-)
-@option(
-    '--token',
-    default=default_config_token,
-    type=pathlib.Path,
-    help='Galbi configuration directory.',
-)
-@option(
-    '--secret-key',
-    type=pathlib.Path,
-    help='ssh secret key',
-    required=True,
-)
-def deploy(filename: str, token: pathlib.Path, config: pathlib.Path,
-           secret_key: pathlib.Path):
-    http = get_http_session(token)
-    server = read_server_url(config)
+def deploy(filename: str):
+    config = load_config(default_config_json)
+    http = get_http_session(default_config_json)
     with open(filename, 'r') as f:
         raw_file = f.read()
-        json.loads(raw_file) 
-    url = urllib.parse.urljoin(server, f'/deploy/{filename}')
-    response = http.post(url, json={
-        'data': encrypt(raw_file),
-    })
-    assert response.status_code == 200
-    echo(f'Run \'galbi get {filename}\' to get config.')
+        payload = json.loads(raw_file) 
+    repo = config['repo']
+
+    echo('depoy start...')
+    for k, v in payload.items():
+        label = http.get(
+            urllib.parse.urljoin(github_api_url, f'/repos/{repo}/labels/{k}')
+        )
+        created = None
+        if label.status_code == 200:
+            issues = get_issue(k)
+            for issue in issues:
+                if issue['title'] == k:
+                    created = issue
+                    break
+        else:
+            resp = http.post(
+                urllib.parse.urljoin(github_api_url, f'/repos/{repo}/labels'),
+                json={'name': k}
+            )
+            resp.raise_for_status()
+        if created is not None:
+            url = created['comments_url']
+        else:
+            resp = http.post(
+                urllib.parse.urljoin(github_api_url, f'/repos/{repo}/issues'),
+                json={
+                    'title': k,
+                    'body': f'created from {filename}',
+                    'labels': [k]
+                }
+            )
+            resp.raise_for_status()
+            url = resp.json()['comments_url']
+        resp = http.post(url, json={
+            'body': json.dumps(v),
+        })
+        resp.raise_for_status()
+        echo(f'"{k}" depoy done...')
+    echo(f'Deploy done.')
 
 
 @command()
-@argument('filename', envvar='FILENAME')
-@option(
-    '--config',
-    default=default_config_json,
-    type=pathlib.Path,
-    help='Galbi configuration file.',
-)
-@option(
-    '--token',
-    default=default_config_token,
-    type=pathlib.Path,
-    help='Galbi configuration directory.',
-)
-@option(
-    '--public-key',
-    type=pathlib.Path,
-    help='ssh public key',
-)
-def get(filename: str, token: pathlib.Path, config: pathlib.Path,
-        public_key: str):
-    http = get_http_session(token)
-    server = read_server_url(config)
-    url = urllib.parse.urljoin(server, f'/config/{filename}')
-    response = http.get(url, json=filename)
-    assert response.status_code == 200
-    payload = response.json()
-    print(payload)
-    echo(json.dumps(json.loads(decrypt(payload['data'])), indent=2))
+@option('--key', '-k', multiple=True)
+def get(key: typing.List[str]):
+    config = load_config(default_config_json)
+    http = get_http_session(default_config_json)
+    repo = config['repo']
+    resp = http.get(
+        urllib.parse.urljoin(github_api_url, f'/repos/{repo}/issues'),
+        params={
+            'state': 'open',
+            'labels': ','.join(x.strip() for x in key),
+        }
+    )
+    resp.raise_for_status()
+    cache = {}
+    for d in resp.json():
+        cache[d['title']] = json.loads(
+            http.get(
+                d['comments_url'],
+                params={'sort': 'created', 'direction': 'desc', 'per_page': 1}
+            ).json()[0]['body']
+        )
+    echo(json.dumps(cache, indent=4))
 
 
 main.add_command(init)
-main.add_command(authorize)
 main.add_command(deploy)
 main.add_command(get)
 
