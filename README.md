@@ -10,11 +10,17 @@ Less important configuration management system.
 - GitHub personal access token: <https://github.com/settings/tokens>
 
 
-### Install dependencies
+### Install
+
+Recommend to use [pipx][] to install command line interface in isolated
+environment.
 
 ```console
-$ pip install -e .
+$ pip install pipx
+$ pipx install galbi
 ```
+
+[pipx]: https://github.com/pipxproject/pipx
 
 
 ### Initialize configuration
@@ -30,7 +36,7 @@ Initialize galbi.
 
 ## How to deploy key?
 
-It uploads json to reposotory's issue.
+It uploads JSON to reposotory's issue.
 
 ```console
 $ galbi deploy something.json
@@ -38,7 +44,19 @@ $ galbi deploy something.json
 ...
 ```
 
+<img src="./images/issue_list.png" />
+
+JSON key should be a title and label of issue.
+
+<img src="./images/issue_detail.png" />
+
+JSON value added to comment of the issue. Latest comment is the configuration
+value of JSON key.
+
+If someone deploy the same JSON key, value pair, It adds comment on the issue.
+
 ## How to get key?
+
 ```
 $ galbi get --key foo --key bar
 {
@@ -46,3 +64,6 @@ $ galbi get --key foo --key bar
     "bar": ...,
 }
 ```
+
+Note that galbi only get a configuration from an opened issue.
+If you want to deprecate/remove the configuration, close the issue.
