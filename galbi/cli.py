@@ -124,7 +124,7 @@ def deploy_kv_to_issue(
         'body': json.dumps(value),
     })
     resp.raise_for_status()
-    echo(f'"{key}" depoy done...')
+    echo(f'"{key}" deploy done...')
 
 
 @command()
