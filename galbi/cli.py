@@ -142,20 +142,19 @@ def deploy(filename: str):
 
 def fetch_all_pages(
     fetch_func: typing.Callable[[int, int], Response]
-) -> typing.List[dict]:
+) -> typing.Iterator[dict]:
     loadable = True
     page = 0
     per_page = 100
-    res = []
     while loadable:
         resp = fetch_func(page, per_page)
         resp.raise_for_status()
         payload = resp.json()
         if per_page > len(payload):
             loadable = False
-        res += payload
+        for item in payload:
+            yield item
         page += 1
-    return res
 
 
 @command()
@@ -177,8 +176,12 @@ def get(key: typing.List[str]):
         )
     )
     for d in issues:
+        if not keys:
+            break
         if d['title'] in keys:
-            comments = fetch_all_pages(
+            keys.remove(d['title'])
+            latest_comment = None
+            for comment in fetch_all_pages(
                 lambda page, per_page: http.get(
                     d['comments_url'],
                     params={
@@ -186,10 +189,12 @@ def get(key: typing.List[str]):
                         'page': page,
                     }
                 )
-            )
-            cache[d['title']] = json.loads(
-                comments[-1]['body']
-            )
+            ):
+                latest_comment = comment
+            else:
+                cache[d['title']] = json.loads(
+                    latest_comment['body']
+                )
     echo(json.dumps(cache, indent=4))
 
 
