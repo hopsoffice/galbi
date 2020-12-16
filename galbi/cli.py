@@ -5,7 +5,7 @@ import typing
 import urllib.parse
 
 from click import argument, command, group, option, echo
-from requests import Session
+from requests import Session, Response
 
 
 __all__ = 'main',
@@ -78,52 +78,83 @@ def get_issue(label: str) -> typing.List[dict]:
 
 
 @command()
+@option('--key', '-k')
+@option('--value', '-v')
+def deploy_key(key: str, value: str):
+    config = load_config(default_config_json)
+    deploy_kv_to_issue(config, key, value, filename='deploy_key.json')
+
+
+def deploy_kv_to_issue(
+    config: dict, key: str, value: str,
+    *, filename: typing.Optional[str]=None
+):
+    repo = config['repo']
+    http = get_http_session(default_config_json)
+    label = http.get(
+        urllib.parse.urljoin(github_api_url, f'/repos/{repo}/labels/{key}')
+    )
+    created = None
+    if label.status_code == 200:
+        issues = get_issue(key)
+        for issue in issues:
+            if issue['title'] == key:
+                created = issue
+                break
+    else:
+        resp = http.post(
+            urllib.parse.urljoin(github_api_url, f'/repos/{repo}/labels'),
+            json={'name': key}
+        )
+        resp.raise_for_status()
+    if created is not None:
+        url = created['comments_url']
+    else:
+        resp = http.post(
+            urllib.parse.urljoin(github_api_url, f'/repos/{repo}/issues'),
+            json={
+                'title': key,
+                'body': f'created from {filename}',
+                'labels': [key]
+            }
+        )
+        resp.raise_for_status()
+        url = resp.json()['comments_url']
+    resp = http.post(url, json={
+        'body': json.dumps(value),
+    })
+    resp.raise_for_status()
+    echo(f'"{key}" deploy done...')
+
+
+@command()
 @argument('filename', envvar='FILENAME', type=pathlib.Path)
 def deploy(filename: str):
     config = load_config(default_config_json)
-    http = get_http_session(default_config_json)
     with open(filename, 'r') as f:
         raw_file = f.read()
         payload = json.loads(raw_file) 
-    repo = config['repo']
-
     echo('depoy start...')
     for k, v in payload.items():
-        label = http.get(
-            urllib.parse.urljoin(github_api_url, f'/repos/{repo}/labels/{k}')
-        )
-        created = None
-        if label.status_code == 200:
-            issues = get_issue(k)
-            for issue in issues:
-                if issue['title'] == k:
-                    created = issue
-                    break
-        else:
-            resp = http.post(
-                urllib.parse.urljoin(github_api_url, f'/repos/{repo}/labels'),
-                json={'name': k}
-            )
-            resp.raise_for_status()
-        if created is not None:
-            url = created['comments_url']
-        else:
-            resp = http.post(
-                urllib.parse.urljoin(github_api_url, f'/repos/{repo}/issues'),
-                json={
-                    'title': k,
-                    'body': f'created from {filename}',
-                    'labels': [k]
-                }
-            )
-            resp.raise_for_status()
-            url = resp.json()['comments_url']
-        resp = http.post(url, json={
-            'body': json.dumps(v),
-        })
-        resp.raise_for_status()
-        echo(f'"{k}" depoy done...')
+        deploy_kv_to_issue(config, k, v, filename=filename)
     echo(f'Deploy done.')
+
+
+def fetch_all_pages(
+    fetch_func: typing.Callable[[int, int], Response]
+) -> typing.Iterator[dict]:
+    loadable = True
+    page = 0
+    per_page = 100
+    while loadable:
+        resp = fetch_func(page, per_page)
+        resp.raise_for_status()
+        payload = resp.json()
+        if per_page > len(payload):
+            loadable = False
+        for item in payload:
+            yield item
+        page += 1
 
 
 @command()
@@ -134,13 +165,8 @@ def get(key: typing.List[str]):
     repo = config['repo']
     cache = {}
     keys = {x for x in key}
-    issues = []
-    loadable = True
-    page = 0
-    # Results per page (max 100)
-    per_page = 100
-    while loadable:
-        resp = http.get(
+    issues = fetch_all_pages(
+        lambda page, per_page: http.get(
             urllib.parse.urljoin(github_api_url, f'/repos/{repo}/issues'),
             params={
                 'state': 'open',
@@ -148,29 +174,33 @@ def get(key: typing.List[str]):
                 'per_page': per_page,
             }
         )
-        resp.raise_for_status()
-        payload = resp.json()
-        issues += payload
-        if per_page > len(payload):
-            loadable = False
-        page += 1
+    )
     for d in issues:
+        if not keys:
+            break
         if d['title'] in keys:
-            cache[d['title']] = json.loads(
-                http.get(
+            keys.remove(d['title'])
+            latest_comment = None
+            for comment in fetch_all_pages(
+                lambda page, per_page: http.get(
                     d['comments_url'],
                     params={
-                        'sort': 'created',
-                        'direction': 'desc',
-                        'per_page': 1
+                        'per_page': per_page,
+                        'page': page,
                     }
-                ).json()[0]['body']
-            )
+                )
+            ):
+                latest_comment = comment
+            else:
+                cache[d['title']] = json.loads(
+                    latest_comment['body']
+                )
     echo(json.dumps(cache, indent=4))
 
 
 main.add_command(init)
 main.add_command(deploy)
+main.add_command(deploy_key)
 main.add_command(get)
 
 
