@@ -55,6 +55,13 @@ value of JSON key.
 
 If someone deploy the same JSON key, value pair, It adds comment on the issue.
 
+For deploying a single configuration, It supports `deploy-key` command.
+
+```console
+$ galbi deploy-key -k foo  -v bar
+...
+```
+
 ## How to get key?
 
 ```
