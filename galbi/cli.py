@@ -82,13 +82,10 @@ def get_issue(label: str) -> typing.List[dict]:
 @option('--value', '-v')
 def deploy_key(key: str, value: str):
     config = load_config(default_config_json)
-    deploy_kv_to_issue(config, key, value, filename='deploy_key.json')
+    deploy_kv_to_issue(config, key, value)
 
 
-def deploy_kv_to_issue(
-    config: dict, key: str, value: str,
-    *, filename: typing.Optional[str]=None
-):
+def deploy_kv_to_issue(config: dict, key: str, value: str):
     repo = config['repo']
     http = get_http_session(default_config_json)
     label = http.get(
@@ -107,21 +104,27 @@ def deploy_kv_to_issue(
             json={'name': key}
         )
         resp.raise_for_status()
+    body = json.dumps(value)
     if created is not None:
         url = created['comments_url']
+        resp = http.patch(
+            created['url'],
+            json={'body': body}
+        )
+        resp.raise_for_status()
     else:
         resp = http.post(
             urllib.parse.urljoin(github_api_url, f'/repos/{repo}/issues'),
             json={
                 'title': key,
-                'body': f'created from {filename}',
+                'body': body,
                 'labels': [key]
             }
         )
         resp.raise_for_status()
         url = resp.json()['comments_url']
     resp = http.post(url, json={
-        'body': json.dumps(value),
+        'body': body,
     })
     resp.raise_for_status()
     echo(f'"{key}" deploy done...')
@@ -136,7 +139,7 @@ def deploy(filename: str):
         payload = json.loads(raw_file) 
     echo('depoy start...')
     for k, v in payload.items():
-        deploy_kv_to_issue(config, k, v, filename=filename)
+        deploy_kv_to_issue(config, k, v)
     echo(f'Deploy done.')
 
 
@@ -180,28 +183,87 @@ def get(key: typing.List[str]):
             break
         if d['title'] in keys:
             keys.remove(d['title'])
-            latest_comment = None
-            for comment in fetch_all_pages(
-                lambda page, per_page: http.get(
-                    d['comments_url'],
-                    params={
-                        'per_page': per_page,
-                        'page': page,
-                    }
-                )
-            ):
-                latest_comment = comment
-            else:
-                cache[d['title']] = json.loads(
-                    latest_comment['body']
-                )
+            cache[d['title']] = json.loads(d['body'])
     echo(json.dumps(cache, indent=4))
+
+
+@command()
+@option('--key', '-k')
+@option('--rev', '-r', type=int)
+def get_rev(key: str, rev: int):
+    config = load_config(default_config_json)
+    http = get_http_session(default_config_json)
+    repo = config['repo']
+    resp = http.get(
+        urllib.parse.urljoin(github_api_url, f'/repos/{repo}/issues'),
+        params={
+            'state': 'open',
+            'per_page': 1,
+            'labels': [key],
+        }
+    )
+    resp.raise_for_status()
+    payload = resp.json()[0]
+    page = rev // 100
+    resp = http.get(
+        payload['comments_url'],
+        params={'per_page': 100, 'page': page}
+    )
+    resp.raise_for_status()
+    echo(json.dumps(json.loads(resp.json()[rev % 100]['body']), indent=2))
+
+
+def abort_if_false(ctx, _, value):
+    if not value:
+        ctx.abort()
+
+
+@command()
+@option('--yes',
+        is_flag=True,
+        callback=abort_if_false,
+        expose_value=False,
+        prompt='Are you sure you want to migrate galbi 0.2 to 1.0?')
+def migrate():
+    config = load_config(default_config_json)
+    http = get_http_session(default_config_json)
+    repo = config['repo']
+    echo('Migrate starting ...')
+    payload = fetch_all_pages(lambda page, per_page: http.get(
+        urllib.parse.urljoin(github_api_url, f'/repos/{repo}/issues'),
+        params={
+            'page': page,
+            'per_page': per_page,
+        }
+    ))
+    for issue in payload:
+        latest_comment = None
+        for comment in fetch_all_pages(lambda page, per_page: http.get(
+            issue['comments_url'],
+            params={
+                'page': page,
+                'per_page': per_page,
+            }
+        )):
+            latest_comment = comment
+        else:
+            resp = http.patch(
+                issue['url'],
+                json={'body': latest_comment['body']}
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            k = payload['title']
+            echo(f'"{k}" updated...')
+    echo('Migrate complete.')
 
 
 main.add_command(init)
 main.add_command(deploy)
 main.add_command(deploy_key)
 main.add_command(get)
+main.add_command(get_rev)
+main.add_command(migrate)
 
 
 if __name__ == '__main__':
