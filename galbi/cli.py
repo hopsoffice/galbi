@@ -78,51 +78,65 @@ def get_issue(label: str) -> typing.List[dict]:
 
 
 @command()
+@option('--key', '-k')
+@option('--value', '-v')
+def deploy_key(key: str, value: str):
+    config = load_config(default_config_json)
+    deploy_kv_to_issue(config, key, value, filename='deploy_key.json')
+
+
+def deploy_kv_to_issue(
+    config: dict, key: str, value: str,
+    *, filename: typing.Optional[str]=None
+):
+    repo = config['repo']
+    http = get_http_session(default_config_json)
+    label = http.get(
+        urllib.parse.urljoin(github_api_url, f'/repos/{repo}/labels/{key}')
+    )
+    created = None
+    if label.status_code == 200:
+        issues = get_issue(key)
+        for issue in issues:
+            if issue['title'] == key:
+                created = issue
+                break
+    else:
+        resp = http.post(
+            urllib.parse.urljoin(github_api_url, f'/repos/{repo}/labels'),
+            json={'name': key}
+        )
+        resp.raise_for_status()
+    if created is not None:
+        url = created['comments_url']
+    else:
+        resp = http.post(
+            urllib.parse.urljoin(github_api_url, f'/repos/{repo}/issues'),
+            json={
+                'title': key,
+                'body': f'created from {filename}',
+                'labels': [key]
+            }
+        )
+        resp.raise_for_status()
+        url = resp.json()['comments_url']
+    resp = http.post(url, json={
+        'body': json.dumps(value),
+    })
+    resp.raise_for_status()
+    echo(f'"{key}" depoy done...')
+
+
+@command()
 @argument('filename', envvar='FILENAME', type=pathlib.Path)
 def deploy(filename: str):
     config = load_config(default_config_json)
-    http = get_http_session(default_config_json)
     with open(filename, 'r') as f:
         raw_file = f.read()
         payload = json.loads(raw_file) 
-    repo = config['repo']
-
     echo('depoy start...')
     for k, v in payload.items():
-        label = http.get(
-            urllib.parse.urljoin(github_api_url, f'/repos/{repo}/labels/{k}')
-        )
-        created = None
-        if label.status_code == 200:
-            issues = get_issue(k)
-            for issue in issues:
-                if issue['title'] == k:
-                    created = issue
-                    break
-        else:
-            resp = http.post(
-                urllib.parse.urljoin(github_api_url, f'/repos/{repo}/labels'),
-                json={'name': k}
-            )
-            resp.raise_for_status()
-        if created is not None:
-            url = created['comments_url']
-        else:
-            resp = http.post(
-                urllib.parse.urljoin(github_api_url, f'/repos/{repo}/issues'),
-                json={
-                    'title': k,
-                    'body': f'created from {filename}',
-                    'labels': [k]
-                }
-            )
-            resp.raise_for_status()
-            url = resp.json()['comments_url']
-        resp = http.post(url, json={
-            'body': json.dumps(v),
-        })
-        resp.raise_for_status()
-        echo(f'"{k}" depoy done...')
+        deploy_kv_to_issue(config, k, v, filename=filename)
     echo(f'Deploy done.')
 
 
@@ -171,6 +185,7 @@ def get(key: typing.List[str]):
 
 main.add_command(init)
 main.add_command(deploy)
+main.add_command(deploy_key)
 main.add_command(get)
 
 
