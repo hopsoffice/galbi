@@ -5,7 +5,7 @@ import typing
 import urllib.parse
 
 from click import argument, command, group, option, echo
-from requests import Session
+from requests import Session, Response
 
 
 __all__ = 'main',
@@ -140,6 +140,24 @@ def deploy(filename: str):
     echo(f'Deploy done.')
 
 
+def fetch_all_pages(
+    fetch_func: typing.Callable[[int, int], Response]
+) -> typing.List[dict]:
+    loadable = True
+    page = 0
+    per_page = 100
+    res = []
+    while loadable:
+        resp = fetch_func(page, per_page)
+        resp.raise_for_status()
+        payload = resp.json()
+        if per_page > len(payload):
+            loadable = False
+        res += payload
+        page += 1
+    return res
+
+
 @command()
 @option('--key', '-k', multiple=True)
 def get(key: typing.List[str]):
@@ -148,13 +166,8 @@ def get(key: typing.List[str]):
     repo = config['repo']
     cache = {}
     keys = {x for x in key}
-    issues = []
-    loadable = True
-    page = 0
-    # Results per page (max 100)
-    per_page = 100
-    while loadable:
-        resp = http.get(
+    issues = fetch_all_pages(
+        lambda page, per_page: http.get(
             urllib.parse.urljoin(github_api_url, f'/repos/{repo}/issues'),
             params={
                 'state': 'open',
@@ -162,23 +175,20 @@ def get(key: typing.List[str]):
                 'per_page': per_page,
             }
         )
-        resp.raise_for_status()
-        payload = resp.json()
-        issues += payload
-        if per_page > len(payload):
-            loadable = False
-        page += 1
+    )
     for d in issues:
         if d['title'] in keys:
-            cache[d['title']] = json.loads(
-                http.get(
+            comments = fetch_all_pages(
+                lambda page, per_page: http.get(
                     d['comments_url'],
                     params={
-                        'sort': 'created',
-                        'direction': 'desc',
-                        'per_page': 1
+                        'per_page': per_page,
+                        'page': page,
                     }
-                ).json()[0]['body']
+                )
+            )
+            cache[d['title']] = json.loads(
+                comments[-1]['body']
             )
     echo(json.dumps(cache, indent=4))
 
